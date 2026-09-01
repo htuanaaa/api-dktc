@@ -89,5 +89,9 @@ def get_schedule(x_user_cookie: str = Header(default=None)):
         "data": schedule_list
     }
 
+@app.get("/ping")
+def ping():
+    return {"status": "alive"}
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=6969)
