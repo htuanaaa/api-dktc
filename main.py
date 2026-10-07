@@ -6,12 +6,8 @@ import uvicorn
 
 app = FastAPI()
 
-@app.get("/api/schedule")
-def get_schedule(x_user_cookie: str = Header(default=None)):
-    if not x_user_cookie:
-        raise HTTPException(status_code=400, detail="thiếu header cookie")
-    
-    headers = {
+def get_request_headers(cookie: str) -> dict:
+    return {
         'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'accept-language': 'vi,en-US;q=0.9,en;q=0.8,fr-FR;q=0.7,fr;q=0.6',
         'cache-control': 'max-age=0',
@@ -26,9 +22,15 @@ def get_schedule(x_user_cookie: str = Header(default=None)):
         'sec-fetch-user': '?1',
         'upgrade-insecure-requests': '1',
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36',
-        'cookie': x_user_cookie
+        'cookie': cookie
     }
+
+@app.get("/api/schedule")
+def get_schedule(x_user_cookie: str = Header(default=None)):
+    if not x_user_cookie:
+        raise HTTPException(status_code=400, detail="thiếu header cookie")
     
+    headers = get_request_headers(x_user_cookie)
     url = "https://sinhvien.ictu.edu.vn/TraCuuLichHoc/Index"
     
     try:
@@ -87,6 +89,81 @@ def get_schedule(x_user_cookie: str = Header(default=None)):
         "status": "success",
         "total": len(schedule_list),
         "data": schedule_list
+    }
+
+@app.get("/api/exam-schedule")
+def get_exam_schedule(x_user_cookie: str = Header(default=None)):
+    if not x_user_cookie:
+        raise HTTPException(status_code=400, detail="thiếu header cookie")
+    
+    headers = get_request_headers(x_user_cookie)
+    url = "https://sinhvien.ictu.edu.vn/TraCuuLichThi/Index"
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+    except requests.exceptions.RequestException:
+        raise HTTPException(status_code=500, detail="không thể kết nối đến máy chủ trường")
+
+    if "formLogin" in response.text:
+        return JSONResponse(
+            status_code=401,
+            content={"status": "error", "message": "cookie đã hết hạn, yêu cầu renew"}
+        )
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    accordion = soup.find("div", id="accordionDotThi")
+    if not accordion:
+        data_div = soup.find("div", id="daTa")
+        if data_div:
+            accordion = data_div.find("div", class_="panel-group")
+
+    if not accordion:
+        return {"status": "success", "total_batches": 0, "data": []}
+
+    batches = []
+    panels = accordion.find_all("div", class_="panel")
+    for panel in panels:
+        title_tag = panel.find("h4", class_="panel-title")
+        dot_thi_title = title_tag.get_text(strip=True) if title_tag else ""
+
+        table = panel.find("table")
+        if not table:
+            continue
+
+        tbody = table.find("tbody")
+        if not tbody:
+            continue
+
+        rows = tbody.find_all("tr")
+        exam_list = []
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) == 11:
+                exam_item = {
+                    "stt": cols[0].get_text(strip=True),
+                    "ma_hp": cols[1].get_text(strip=True),
+                    "ten_hp": cols[2].get_text(strip=True),
+                    "ngay_thi": cols[3].get_text(strip=True),
+                    "ca_thi": cols[4].get_text(strip=True),
+                    "gio_thi": cols[5].get_text(strip=True),
+                    "lan_thi": cols[6].get_text(strip=True),
+                    "dot_thi": cols[7].get_text(strip=True),
+                    "sbd": cols[8].get_text(strip=True),
+                    "phong_thi": cols[9].get_text(strip=True),
+                    "hinh_thuc": cols[10].get_text(strip=True)
+                }
+                exam_list.append(exam_item)
+
+        batches.append({
+            "dot_thi": dot_thi_title,
+            "total_mon": len(exam_list),
+            "danh_sach_thi": exam_list
+        })
+
+    return {
+        "status": "success",
+        "total_batches": len(batches),
+        "data": batches
     }
 
 @app.get("/ping")
