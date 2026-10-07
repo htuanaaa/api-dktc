@@ -1,10 +1,88 @@
-from fastapi import FastAPI, Header, HTTPException
+import os
+import json
+from typing import Optional
+from dotenv import load_dotenv
+from fastapi import FastAPI, Header, HTTPException, Depends
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 import requests
 from bs4 import BeautifulSoup
 import uvicorn
 
-app = FastAPI()
+load_dotenv()
+
+ENV = os.getenv("ENV", "development").lower()
+is_production = (ENV == "production")
+API_KEY = os.getenv("API_KEY")
+if not API_KEY or not API_KEY.strip():
+    raise RuntimeError("Biến API_KEY chưa được thiết lập! vui lòng cấu hình trong file .env")
+API_KEY = API_KEY.strip()
+COOKIE_FILE = "cookie.json"
+
+app = FastAPI(
+    docs_url=None if is_production else "/docs",
+    redoc_url=None if is_production else "/redoc",
+    openapi_url=None if is_production else "/openapi.json"
+)
+
+CACHED_COOKIE: Optional[str] = None
+
+def load_cookie_from_storage() -> Optional[str]:
+    global CACHED_COOKIE
+    if CACHED_COOKIE:
+        return CACHED_COOKIE
+    if os.path.exists(COOKIE_FILE):
+        try:
+            with open(COOKIE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    CACHED_COOKIE = "; ".join(
+                        [f"{c['name']}={c['value']}" for c in data if "name" in c and "value" in c]
+                    )
+                elif isinstance(data, dict) and "cookie" in data:
+                    CACHED_COOKIE = data["cookie"]
+                elif isinstance(data, str):
+                    CACHED_COOKIE = data
+                return CACHED_COOKIE
+        except Exception:
+            pass
+    return None
+
+def save_cookie_to_storage(cookie_str: str):
+    global CACHED_COOKIE
+    CACHED_COOKIE = cookie_str
+    try:
+        with open(COOKIE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"cookie": cookie_str}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def clear_cached_cookie():
+    global CACHED_COOKIE
+    CACHED_COOKIE = None
+    if os.path.exists(COOKIE_FILE):
+        try:
+            os.remove(COOKIE_FILE)
+        except Exception:
+            pass
+
+def verify_api_key(x_api_key: Optional[str] = Header(default=None)):
+    if not x_api_key or x_api_key != API_KEY:
+        raise HTTPException(
+            status_code=403,
+            detail="api key không hợp lệ"
+        )
+
+def resolve_cookie(user_cookie: Optional[str]) -> str:
+    if user_cookie and user_cookie.strip():
+        return user_cookie.strip()
+    cached = load_cookie_from_storage()
+    if cached and cached.strip():
+        return cached.strip()
+    raise HTTPException(
+        status_code=400,
+        detail="hệ thống chưa có cookie..."
+    )
 
 def get_request_headers(cookie: str) -> dict:
     return {
@@ -25,12 +103,21 @@ def get_request_headers(cookie: str) -> dict:
         'cookie': cookie
     }
 
-@app.get("/api/schedule")
-def get_schedule(x_user_cookie: str = Header(default=None)):
-    if not x_user_cookie:
-        raise HTTPException(status_code=400, detail="thiếu header cookie")
-    
-    headers = get_request_headers(x_user_cookie)
+class SetCookieRequest(BaseModel):
+    cookie: str
+
+@app.post("/api/internal/set-cookie", dependencies=[Depends(verify_api_key)])
+def set_cookie(payload: SetCookieRequest):
+    if not payload.cookie or not payload.cookie.strip():
+        raise HTTPException(status_code=400, detail="cookie không được để trống")
+    save_cookie_to_storage(payload.cookie.strip())
+    return {"status": "success", "message": "cập nhật cookie thành công!"}
+
+
+@app.get("/api/schedule", dependencies=[Depends(verify_api_key)])
+def get_schedule(x_user_cookie: Optional[str] = Header(default=None)):
+    active_cookie = resolve_cookie(x_user_cookie)
+    headers = get_request_headers(active_cookie)
     url = "https://sinhvien.ictu.edu.vn/TraCuuLichHoc/Index"
     
     try:
@@ -39,9 +126,11 @@ def get_schedule(x_user_cookie: str = Header(default=None)):
         raise HTTPException(status_code=500, detail="không thể kết nối đến máy chủ trường")
 
     if "formLogin" in response.text:
+        if not x_user_cookie:
+            clear_cached_cookie()
         return JSONResponse(
             status_code=401,
-            content={"status": "error", "message": "cookie đã hết hạn, yêu cầu renew"}
+            content={"status": "error", "message": "cookie đã hết hạn..."}
         )
 
     soup = BeautifulSoup(response.text, "html.parser")
@@ -91,12 +180,10 @@ def get_schedule(x_user_cookie: str = Header(default=None)):
         "data": schedule_list
     }
 
-@app.get("/api/exam-schedule")
-def get_exam_schedule(x_user_cookie: str = Header(default=None)):
-    if not x_user_cookie:
-        raise HTTPException(status_code=400, detail="thiếu header cookie")
-    
-    headers = get_request_headers(x_user_cookie)
+@app.get("/api/exam-schedule", dependencies=[Depends(verify_api_key)])
+def get_exam_schedule(x_user_cookie: Optional[str] = Header(default=None)):
+    active_cookie = resolve_cookie(x_user_cookie)
+    headers = get_request_headers(active_cookie)
     url = "https://sinhvien.ictu.edu.vn/TraCuuLichThi/Index"
     
     try:
@@ -105,9 +192,11 @@ def get_exam_schedule(x_user_cookie: str = Header(default=None)):
         raise HTTPException(status_code=500, detail="không thể kết nối đến máy chủ trường")
 
     if "formLogin" in response.text:
+        if not x_user_cookie:
+            clear_cached_cookie()
         return JSONResponse(
             status_code=401,
-            content={"status": "error", "message": "cookie đã hết hạn, yêu cầu renew"}
+            content={"status": "error", "message": "cookie đã hết hạn..."}
         )
 
     soup = BeautifulSoup(response.text, "html.parser")
